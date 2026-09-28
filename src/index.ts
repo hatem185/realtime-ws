@@ -21,7 +21,7 @@ export type {
 
 // Core (framework-agnostic)
 export { RealtimeHub, createRealtimeHub } from "./core/RealtimeHub";
-export { ConnectionManager } from "./core/ConnectionManager";
+export { ConnectionManager, CloseCodes } from "./core/ConnectionManager";
 export { ChannelRegistry } from "./core/ChannelRegistry";
 export { SessionManager } from "./core/SessionManager";
 export { RedisPubSub } from "./core/RedisPubSub";

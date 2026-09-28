@@ -5,6 +5,13 @@
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
     "src",
@@ -13,7 +20,18 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "test": "npm run build && node --test --test-concurrency=1 --test-force-exit --test-timeout=120000 'test/unit/*.test.js' 'test/regression/*.test.js'",
+    "test:integration": "sh test/run.sh integration",
+    "test:redis": "sh test/run.sh redis",
+    "test:failure": "sh test/run.sh failure",
+    "test:memory": "sh test/run.sh memory",
+    "test:load": "sh test/run.sh load",
+    "test:package": "sh test/run.sh package",
+    "benchmark": "sh test/run.sh benchmark",
+    "env:up": "sh test/run.sh up",
+    "env:down": "sh test/run.sh down"
   },
   "peerDependencies": {
     "ws": "^8.0.0",
@@ -21,13 +39,21 @@
     "express": "^4.0.0"
   },
   "peerDependenciesMeta": {
-    "ioredis": { "optional": true },
-    "express": { "optional": true }
+    "ioredis": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.0.0",
     "@types/ws": "^8.5.10",
-    "typescript": "^5.4.0"
+    "express": "^4.21.2",
+    "ioredis": "^5.4.1",
+    "mongodb": "^6.12.0",
+    "typescript": "^5.4.0",
+    "ws": "^8.18.0"
   }
 }

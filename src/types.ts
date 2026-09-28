@@ -108,6 +108,10 @@ export interface RedisLike {
     publish(channel: string, message: string): Promise<number> | number;
     subscribe(...channels: string[]): Promise<unknown> | unknown;
     unsubscribe(...channels: string[]): Promise<unknown> | unknown;
+    /** ioredis `lazyConnect` support: used to connect the hub's own subscriber connection. */
+    connect?(): Promise<unknown> | unknown;
+    /** Used to drop the hub's own subscriber connection if QUIT goes unanswered at shutdown. */
+    disconnect?(): unknown;
     on(event: string, listener: (...args: any[]) => void): unknown;
     removeAllListeners(): unknown;
     quit(): Promise<unknown> | unknown;
@@ -153,6 +157,22 @@ export interface RealtimeHubOptions {
     /** Hard cap on inbound message size in bytes. Default: 64 KB. */
     maxMessageSizeBytes?: number;
 
+    /**
+     * Max topics one connection may be subscribed to at once; further subscribes get
+     * `SUBSCRIBE_FAILED`. Bounds memory (local and in Redis) on permissive channels. Default: 1000.
+     */
+    maxSubscriptionsPerConnection?: number;
+
+    /** Longest accepted topic, in characters; longer subscribes get `SUBSCRIBE_FAILED`. Default: 256. */
+    maxTopicLength?: number;
+
+    /**
+     * Longest one message may take to handle (authorize(), channel hooks, Redis confirmation).
+     * A connection stuck on a message for longer is closed with 1013 at the next heartbeat, so a
+     * hook that never settles can't wedge it forever. Default: 30000.
+     */
+    requestTimeoutMs?: number;
+
     /** Per-connection rate limit window in ms. Default: 1000. */
     rateLimitWindowMs?: number;
 
@@ -165,14 +185,31 @@ export interface RealtimeHubOptions {
      */
     backpressureThresholdBytes?: number;
 
-    /** Session TTL in seconds (Redis layer only). Default: 120. */
+    /**
+     * Session TTL in seconds (Redis layer only). Refreshed by the heartbeat, so keep it
+     * comfortably above `heartbeatMs` (at least 2x). Default: 120.
+     */
     sessionTtlSeconds?: number;
+
+    /**
+     * Upper bound for {@link RealtimeHub.shutdown}: how long to wait for close handshakes
+     * and cleanup before terminating what's left. Keep it below your orchestrator's
+     * termination grace period. Default: 10000.
+     */
+    shutdownTimeoutMs?: number;
 
     /** Optional logger. Defaults to a thin `console` wrapper. */
     logger?: Logger;
 }
 
-export interface ResolvedHubOptions extends Required<Omit<RealtimeHubOptions, "redis" | "logger">> {
+/** Options added after 1.0; optional in {@link ResolvedHubOptions} so hand-built options still compile. */
+type LaterOptions =
+    "shutdownTimeoutMs" | "maxSubscriptionsPerConnection" | "maxTopicLength" | "requestTimeoutMs";
+
+export interface ResolvedHubOptions
+    extends
+        Required<Omit<RealtimeHubOptions, "redis" | "logger" | LaterOptions>>,
+        Pick<RealtimeHubOptions, LaterOptions> {
     redis: RedisLike | null;
     logger: Logger;
 }

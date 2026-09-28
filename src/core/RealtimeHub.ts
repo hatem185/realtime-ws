@@ -8,7 +8,7 @@ import type {
 } from "../types";
 import { defaultLogger } from "../utils/logger";
 import { ChannelRegistry } from "./ChannelRegistry";
-import { ConnectionManager } from "./ConnectionManager";
+import { ConnectionManager, LIMIT_DEFAULTS } from "./ConnectionManager";
 import { RedisPubSub } from "./RedisPubSub";
 import { SessionManager } from "./SessionManager";
 
@@ -30,6 +30,8 @@ export class RealtimeHub {
     public readonly sessions: SessionManager;
     public readonly registry: ChannelRegistry;
     public readonly connections: ConnectionManager;
+    private readonly shutdownHooks = new Set<() => void>();
+    private shutdownPromise: Promise<void> | null = null;
 
     constructor(opts: RealtimeHubOptions) {
         this.logger = opts.logger ?? defaultLogger;
@@ -41,12 +43,27 @@ export class RealtimeHub {
             heartbeatMs: opts.heartbeatMs ?? 30_000,
             maxConnectionsPerUser: opts.maxConnectionsPerUser ?? 10,
             maxMessageSizeBytes: opts.maxMessageSizeBytes ?? 64 * 1024,
+            maxSubscriptionsPerConnection:
+                opts.maxSubscriptionsPerConnection ?? LIMIT_DEFAULTS.maxSubscriptionsPerConnection,
+            maxTopicLength: opts.maxTopicLength ?? LIMIT_DEFAULTS.maxTopicLength,
+            requestTimeoutMs: opts.requestTimeoutMs ?? LIMIT_DEFAULTS.requestTimeoutMs,
             rateLimitWindowMs: opts.rateLimitWindowMs ?? 1000,
             rateLimitMaxMessages: opts.rateLimitMaxMessages ?? 20,
             backpressureThresholdBytes: opts.backpressureThresholdBytes ?? 128 * 1024,
             sessionTtlSeconds: opts.sessionTtlSeconds ?? 120,
+            shutdownTimeoutMs: opts.shutdownTimeoutMs ?? LIMIT_DEFAULTS.shutdownTimeoutMs,
             logger: this.logger,
         };
+
+        if (
+            this.options.redis &&
+            this.options.sessionTtlSeconds * 1000 < 2 * this.options.heartbeatMs
+        ) {
+            this.logger.warn(
+                `sessionTtlSeconds (${this.options.sessionTtlSeconds}s) is less than 2x heartbeatMs ` +
+                    `(${this.options.heartbeatMs}ms); presence may expire between heartbeat refreshes.`,
+            );
+        }
 
         const prefix = this.options.redisPrefix.endsWith(":")
             ? this.options.redisPrefix
@@ -121,20 +138,55 @@ export class RealtimeHub {
         channels: string[];
         instanceId: string;
         redisAvailable: boolean;
+        droppedMessages: number;
     } {
         return {
             localConnections: this.connections.connectionCount,
             channels: this.registry.getChannelNames(),
             instanceId: this.sessions.instanceId,
             redisAvailable: this.pubsub.isAvailable(),
+            droppedMessages: this.connections.droppedMessages,
         };
     }
 
-    /** Graceful shutdown — call from your SIGTERM handler. */
-    async shutdown(): Promise<void> {
-        await this.connections.shutdown();
-        await this.pubsub.shutdown();
-        this.logger.info("Hub shut down.");
+    /** True once {@link shutdown} has been called. */
+    get isShuttingDown(): boolean {
+        return this.shutdownPromise !== null;
+    }
+
+    /**
+     * Run `hook` synchronously when shutdown starts. Adapters use it to stop accepting new
+     * connections (e.g. {@link attachWsServer} detaches its upgrade listener). Returns an
+     * unregister function.
+     */
+    onShutdown(hook: () => void): () => void {
+        this.shutdownHooks.add(hook);
+        return () => this.shutdownHooks.delete(hook);
+    }
+
+    /**
+     * Graceful shutdown — call from your SIGTERM handler. Stops accepting connections, closes
+     * every connection with 1001 (going away), removes presence from Redis and quits the
+     * subscriber connection. Bounded by `shutdownTimeoutMs`; repeated calls share one run.
+     */
+    shutdown(): Promise<void> {
+        if (!this.shutdownPromise) {
+            // Set before any hook runs, so hooks already see isShuttingDown and a nested
+            // shutdown() call gets this same promise.
+            this.shutdownPromise = Promise.resolve().then(async () => {
+                for (const hook of this.shutdownHooks) {
+                    try {
+                        hook();
+                    } catch (err) {
+                        this.logger.error("Shutdown hook error:", err);
+                    }
+                }
+                await this.connections.shutdown();
+                await this.pubsub.shutdown();
+                this.logger.info("Hub shut down.");
+            });
+        }
+        return this.shutdownPromise;
     }
 }
 

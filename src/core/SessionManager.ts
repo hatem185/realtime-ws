@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { Logger, RedisLike } from "../types";
+import { redisUsable } from "../utils/async";
 
 const LAST_ACTIVE_TTL_SECONDS = 90 * 24 * 60 * 60;
 
@@ -16,14 +17,20 @@ interface SessionData {
  *
  * - **In-memory** (always active): O(1) local lookups.
  * - **Redis** (optional): when supplied, replicates session/online keys
- *   so cross-instance "is X online?" queries work. Falls back silently
- *   to memory-only on any Redis failure — connections never break.
+ *   so cross-instance "is X online?" queries work. Keys are kept alive by
+ *   {@link refresh} from the heartbeat. Redis failures are logged and the
+ *   hub carries on memory-only — connections never break.
+ *
+ * Commands for one operation are issued together (pipelined on the
+ * connection) instead of one round trip each; Redis runs them in order.
  */
 export class SessionManager {
     public readonly instanceId = randomUUID();
 
     private readonly localSessions = new Map<string, SessionData>();
     private readonly userSessions = new Map<string, Set<string>>();
+    /** Sessions whose JSON in Redis is out of date (changed, or the key was lost). */
+    private readonly stale = new Set<string>();
 
     constructor(
         private readonly redis: RedisLike | null,
@@ -33,7 +40,7 @@ export class SessionManager {
     ) {}
 
     private redisAvailable(): boolean {
-        return !!this.redis && this.redis.status === "ready";
+        return !!this.redis && redisUsable(this.redis);
     }
 
     private sessionKey(userId: string, connectionId: string): string {
@@ -63,20 +70,19 @@ export class SessionManager {
         this.userSessions.set(userId, set);
 
         if (!this.redis || !this.redisAvailable()) return;
+        const r = this.redis;
+        const online = this.onlineKey(userId);
         try {
-            const r = this.redis;
-            await r.setex(
-                this.sessionKey(userId, connectionId),
-                this.ttlSeconds,
-                JSON.stringify(session),
-            );
-            await r.sadd(this.onlineKey(userId), connectionId);
-            await r.expire(this.onlineKey(userId), this.ttlSeconds);
-            await r.setex(
-                this.lastActiveKey(userId),
-                LAST_ACTIVE_TTL_SECONDS,
-                Date.now().toString(),
-            );
+            await Promise.all([
+                r.setex(
+                    this.sessionKey(userId, connectionId),
+                    this.ttlSeconds,
+                    JSON.stringify(session),
+                ),
+                r.sadd(online, connectionId),
+                r.expire(online, this.ttlSeconds),
+                r.setex(this.lastActiveKey(userId), LAST_ACTIVE_TTL_SECONDS, Date.now().toString()),
+            ]);
         } catch (err) {
             this.logger.error("Redis register error:", err);
         }
@@ -87,6 +93,7 @@ export class SessionManager {
         if (!session) return;
 
         this.localSessions.delete(connectionId);
+        this.stale.delete(connectionId);
         const set = this.userSessions.get(session.userId);
         if (set) {
             set.delete(connectionId);
@@ -94,54 +101,89 @@ export class SessionManager {
         }
 
         if (!this.redis || !this.redisAvailable()) return;
+        const r = this.redis;
         try {
-            const r = this.redis;
-            await r.del(this.sessionKey(session.userId, connectionId));
-            await r.srem(this.onlineKey(session.userId), connectionId);
-            const remaining = await r.scard(this.onlineKey(session.userId));
-            if (remaining === 0) await r.del(this.onlineKey(session.userId));
-            await r.setex(
-                this.lastActiveKey(session.userId),
-                LAST_ACTIVE_TTL_SECONDS,
-                Date.now().toString(),
-            );
+            // No SCARD + DEL afterwards: Redis deletes the set when its last member goes, and a
+            // DEL could wipe a member another connection of this user added in between.
+            await Promise.all([
+                r.del(this.sessionKey(session.userId, connectionId)),
+                r.srem(this.onlineKey(session.userId), connectionId),
+                r.setex(
+                    this.lastActiveKey(session.userId),
+                    LAST_ACTIVE_TTL_SECONDS,
+                    Date.now().toString(),
+                ),
+            ]);
         } catch (err) {
             this.logger.error("Redis unregister error:", err);
         }
     }
 
-    async refreshTTL(connectionId: string): Promise<void> {
-        const session = this.localSessions.get(connectionId);
-        if (!session || !this.redis || !this.redisAvailable()) return;
+    /**
+     * Heartbeat refresh for live connections: re-add each connection to its user's online set
+     * (which also restores presence after expiry or a Redis restart) and extend the TTLs. A
+     * session's JSON is rewritten only when it changed or Redis lost the key; `lastActive` is
+     * bumped only for `activeUsers` (every user when omitted).
+     */
+    async refresh(
+        connectionIds: Iterable<string>,
+        activeUsers?: ReadonlySet<string>,
+    ): Promise<void> {
+        if (!this.redis || !this.redisAvailable()) return;
+        const r = this.redis;
+        const now = Date.now().toString();
+        const users = new Set<string>();
+        const ops: Promise<unknown>[] = [];
+
+        for (const connectionId of connectionIds) {
+            const session = this.localSessions.get(connectionId);
+            if (!session) continue;
+            const key = this.sessionKey(session.userId, connectionId);
+            if (this.stale.delete(connectionId)) {
+                const write = Promise.resolve(
+                    r.setex(key, this.ttlSeconds, JSON.stringify(session)),
+                );
+                ops.push(write.catch((err) => this.markStale(connectionId, err)));
+            } else {
+                const touch = Promise.resolve(r.expire(key, this.ttlSeconds));
+                ops.push(touch.then((found) => found === 0 && this.markStale(connectionId)));
+            }
+
+            const online = this.onlineKey(session.userId);
+            ops.push(Promise.resolve(r.sadd(online, connectionId)));
+            if (!users.has(session.userId)) {
+                users.add(session.userId);
+                ops.push(Promise.resolve(r.expire(online, this.ttlSeconds)));
+                if (!activeUsers || activeUsers.has(session.userId)) {
+                    const lastActive = this.lastActiveKey(session.userId);
+                    ops.push(Promise.resolve(r.setex(lastActive, LAST_ACTIVE_TTL_SECONDS, now)));
+                }
+            }
+        }
+
         try {
-            const r = this.redis;
-            await r.expire(this.sessionKey(session.userId, connectionId), this.ttlSeconds);
-            await r.expire(this.onlineKey(session.userId), this.ttlSeconds);
-            await r.setex(
-                this.lastActiveKey(session.userId),
-                LAST_ACTIVE_TTL_SECONDS,
-                Date.now().toString(),
-            );
-        } catch {
-            // non-critical
+            await Promise.all(ops);
+        } catch (err) {
+            this.logger.error("Redis presence refresh error:", err);
         }
     }
 
+    private markStale(connectionId: string, err?: unknown): void {
+        if (this.localSessions.has(connectionId)) this.stale.add(connectionId);
+        if (err) throw err;
+    }
+
+    /** Refresh one connection's presence keys and its user's `lastActive` (see {@link refresh}). */
+    async refreshTTL(connectionId: string): Promise<void> {
+        await this.refresh([connectionId]);
+    }
+
+    /** Local only; the session key in Redis picks the new list up on the next {@link refresh}. */
     async updateSubscriptions(connectionId: string, channels: string[]): Promise<void> {
         const session = this.localSessions.get(connectionId);
         if (!session) return;
         session.subscribedChannels = channels;
-
-        if (!this.redis || !this.redisAvailable()) return;
-        try {
-            await this.redis.setex(
-                this.sessionKey(session.userId, connectionId),
-                this.ttlSeconds,
-                JSON.stringify(session),
-            );
-        } catch {
-            // non-critical
-        }
+        this.stale.add(connectionId);
     }
 
     getLocalSession(connectionId: string): SessionData | undefined {

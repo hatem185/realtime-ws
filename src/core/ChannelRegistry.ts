@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import type { AuthIdentity, IChannel, Logger } from "../types";
+import { settleWithin } from "../utils/async";
 import type { RedisPubSub } from "./RedisPubSub";
 
 type DeliveryFn = (connectionId: string, message: string) => void;
@@ -8,6 +9,36 @@ type GetUserConnsFn = (userId: string) => Set<string>;
 interface RedisEnvelope {
     _instanceId?: string;
     message?: string;
+    userId?: string;
+}
+
+/**
+ * Pub/Sub channel carrying {@link ChannelRegistry.publishToUser} traffic between instances.
+ * Can't collide with a topic key: `#` is always escaped in the channel part of those.
+ */
+const USER_CHANNEL = "#user";
+
+/** Longest a subscribe waits for Redis to confirm the SUBSCRIBE before acknowledging anyway. */
+const REDIS_SUBSCRIBE_WAIT_MS = 2000;
+
+const ESCAPE: Record<string, string> = { "%": "%25", ":": "%3A", "#": "%23" };
+const UNESCAPE: Record<string, string> = { "25": "%", "3A": ":", "23": "#" };
+
+/**
+ * Key for a channel + topic pair. `%`, `:` and `#` are escaped in the channel name, so the
+ * first `:` always separates channel from topic, whatever either contains.
+ */
+export function topicKey(channel: string, topic: string): string {
+    return `${channel.replace(/[%:#]/g, (c) => ESCAPE[c])}:${topic}`;
+}
+
+/** Inverse of {@link topicKey}. */
+export function parseTopicKey(key: string): { channel: string; topic: string } {
+    const i = key.indexOf(":");
+    return {
+        channel: key.slice(0, i).replace(/%(25|3A|23)/g, (_, hex: string) => UNESCAPE[hex]),
+        topic: key.slice(i + 1),
+    };
 }
 
 /**
@@ -31,7 +62,9 @@ export class ChannelRegistry {
     constructor(
         private readonly pubsub: RedisPubSub,
         private readonly logger: Logger,
-    ) {}
+    ) {
+        void this.pubsub.subscribe(USER_CHANNEL, (raw) => this.handleUserMessage(raw));
+    }
 
     /** Wired by {@link ConnectionManager} during hub bootstrap. */
     setDeliveryHandler(fn: DeliveryFn): void {
@@ -44,6 +77,9 @@ export class ChannelRegistry {
     }
 
     register(channel: IChannel): void {
+        if (typeof channel.name !== "string" || !channel.name) {
+            throw new Error("Channel name must be a non-empty string");
+        }
         if (this.channels.has(channel.name)) {
             this.logger.warn(`Channel "${channel.name}" already registered, replacing.`);
         }
@@ -63,10 +99,7 @@ export class ChannelRegistry {
         return [...this.channels.keys()];
     }
 
-    private topicKey(channel: string, topic: string): string {
-        return `${channel}:${topic}`;
-    }
-
+    /** Authorize, then subscribe (see {@link addSubscription}). Throws if `authorize()` throws. */
     async subscribe(
         connectionId: string,
         identity: AuthIdentity,
@@ -79,54 +112,44 @@ export class ChannelRegistry {
         const authorized = await channel.authorize(identity, topic);
         if (!authorized) return false;
 
-        const key = this.topicKey(channelName, topic);
-        let subscribers = this.topicSubscribers.get(key);
-        const isFirstLocal = !subscribers || subscribers.size === 0;
+        await this.addSubscription(connectionId, identity, channelName, topic);
+        return true;
+    }
 
-        if (!subscribers) {
-            subscribers = new Set();
-            this.topicSubscribers.set(key, subscribers);
-        }
-        subscribers.add(connectionId);
+    /**
+     * Record an already-authorized subscription: add the local subscriber, subscribe in Redis
+     * for the topic's first local subscriber, run `onSubscribe`, then wait (bounded) for Redis
+     * to confirm, so cross-instance messages flow once this resolves.
+     */
+    async addSubscription(
+        connectionId: string,
+        identity: AuthIdentity,
+        channelName: string,
+        topic: string,
+    ): Promise<void> {
+        const redisReady = this.addSubscriber(topicKey(channelName, topic), connectionId);
 
-        if (isFirstLocal && this.pubsub.isAvailable()) {
-            const handler = (raw: string) => this.handleRedisMessage(key, raw);
-            this.redisHandlers.set(key, handler);
-            await this.pubsub.subscribe(key, handler);
-        }
-
-        if (channel.onSubscribe) {
+        const channel = this.channels.get(channelName);
+        if (channel?.onSubscribe) {
             try {
                 await channel.onSubscribe(connectionId, identity, topic);
             } catch (err) {
                 this.logger.error(`onSubscribe error for ${channelName}:`, err);
             }
         }
-        return true;
+        await settleWithin(redisReady, REDIS_SUBSCRIBE_WAIT_MS);
     }
 
+    /** Remove a subscription. `onUnsubscribe` runs only if the connection was subscribed. */
     async unsubscribe(
         connectionId: string,
         identity: AuthIdentity,
         channelName: string,
         topic: string,
     ): Promise<void> {
+        if (!this.removeSubscriber(topicKey(channelName, topic), connectionId)) return;
+
         const channel = this.channels.get(channelName);
-        const key = this.topicKey(channelName, topic);
-        const subscribers = this.topicSubscribers.get(key);
-
-        if (subscribers) {
-            subscribers.delete(connectionId);
-            if (subscribers.size === 0) {
-                this.topicSubscribers.delete(key);
-                const handler = this.redisHandlers.get(key);
-                if (handler) {
-                    await this.pubsub.unsubscribe(key, handler);
-                    this.redisHandlers.delete(key);
-                }
-            }
-        }
-
         if (channel?.onUnsubscribe) {
             try {
                 await channel.onUnsubscribe(connectionId, identity, topic);
@@ -136,6 +159,7 @@ export class ChannelRegistry {
         }
     }
 
+    /** Run the channel's `onMessage` and publish its broadcast. Errors are logged. */
     async handleMessage(
         connectionId: string,
         identity: AuthIdentity,
@@ -143,16 +167,29 @@ export class ChannelRegistry {
         topic: string,
         payload: unknown,
     ): Promise<void> {
+        await this.runMessage(connectionId, identity, channelName, topic, payload);
+    }
+
+    /** Like {@link handleMessage}, resolving `false` if `onMessage` threw. */
+    async runMessage(
+        connectionId: string,
+        identity: AuthIdentity,
+        channelName: string,
+        topic: string,
+        payload: unknown,
+    ): Promise<boolean> {
         const channel = this.channels.get(channelName);
-        if (!channel?.onMessage) return;
+        if (!channel?.onMessage) return true;
 
         try {
             const result = await channel.onMessage(connectionId, identity, topic, payload);
-            if (result && "broadcast" in result && result.broadcast !== undefined) {
+            if (result && typeof result === "object" && result.broadcast !== undefined) {
                 await this.publish(channelName, topic, result.broadcast);
             }
+            return true;
         } catch (err) {
             this.logger.error(`onMessage error for ${channelName}:`, err);
+            return false;
         }
     }
 
@@ -161,31 +198,31 @@ export class ChannelRegistry {
         identity: AuthIdentity,
         subscribedKeys: Set<string>,
     ): Promise<void> {
-        for (const key of subscribedKeys) {
-            const subscribers = this.topicSubscribers.get(key);
-            if (!subscribers) continue;
-            subscribers.delete(connectionId);
-            if (subscribers.size === 0) {
-                this.topicSubscribers.delete(key);
-                const handler = this.redisHandlers.get(key);
-                if (handler) {
-                    await this.pubsub.unsubscribe(key, handler);
-                    this.redisHandlers.delete(key);
-                }
-            }
-        }
+        this.removeConnection(connectionId, subscribedKeys);
+        await this.notifyDisconnect(connectionId, identity, subscribedKeys);
+    }
 
-        const notified = new Set<string>();
-        for (const key of subscribedKeys) {
-            const channelName = key.split(":")[0];
-            if (notified.has(channelName)) continue;
-            notified.add(channelName);
-            const channel = this.channels.get(channelName);
+    /** Synchronously drop a connection from each of the given topic keys. */
+    removeConnection(connectionId: string, keys: Iterable<string>): void {
+        for (const key of keys) this.removeSubscriber(key, connectionId);
+    }
+
+    /** Run `onDisconnect` once per channel among the given topic keys. */
+    async notifyDisconnect(
+        connectionId: string,
+        identity: AuthIdentity,
+        keys: Iterable<string>,
+    ): Promise<void> {
+        const names = new Set<string>();
+        for (const key of keys) names.add(parseTopicKey(key).channel);
+
+        for (const name of names) {
+            const channel = this.channels.get(name);
             if (!channel?.onDisconnect) continue;
             try {
                 await channel.onDisconnect(connectionId, identity);
             } catch (err) {
-                this.logger.error(`onDisconnect error for ${channelName}:`, err);
+                this.logger.error(`onDisconnect error for ${name}:`, err);
             }
         }
     }
@@ -195,7 +232,7 @@ export class ChannelRegistry {
      * (local + remote via Redis).
      */
     async publish(channelName: string, topic: string, payload: unknown): Promise<void> {
-        const key = this.topicKey(channelName, topic);
+        const key = topicKey(channelName, topic);
         const message = JSON.stringify({
             event: "message",
             channel: channelName,
@@ -212,8 +249,8 @@ export class ChannelRegistry {
     }
 
     /**
-     * Publish to every connection of a specific user — useful for
-     * notifications and other user-targeted events.
+     * Publish to every connection of a specific user, on every instance, and to nobody else.
+     * The topic only labels the delivered event; it isn't used for routing.
      */
     async publishToUser(
         userId: string,
@@ -228,26 +265,57 @@ export class ChannelRegistry {
             payload,
         });
 
-        if (this.deliverFn && this.getUserConnsFn) {
-            const conns = this.getUserConnsFn(userId);
-            for (const id of conns) {
-                try {
-                    this.deliverFn(id, message);
-                } catch (err) {
-                    this.logger.error(`Delivery to ${id} failed:`, err);
-                }
-            }
-        }
+        this.deliverToUser(userId, message);
 
         if (this.pubsub.isAvailable()) {
-            const key = this.topicKey(channelName, topic);
-            const envelope = JSON.stringify({ _instanceId: this.instanceId, message });
-            await this.pubsub.publish(key, envelope);
+            const envelope = JSON.stringify({ _instanceId: this.instanceId, userId, message });
+            await this.pubsub.publish(USER_CHANNEL, envelope);
         }
     }
 
     getSubscriberCount(channelName: string, topic: string): number {
-        return this.topicSubscribers.get(this.topicKey(channelName, topic))?.size ?? 0;
+        return this.topicSubscribers.get(topicKey(channelName, topic))?.size ?? 0;
+    }
+
+    /** Number of topics with at least one local subscriber. */
+    get topicCount(): number {
+        return this.topicSubscribers.size;
+    }
+
+    /**
+     * Returns the in-flight Redis SUBSCRIBE for the key, if any. Bookkeeping is synchronous, so
+     * racing subscribes and unsubscribes can't strand or double up a Redis handler.
+     */
+    private addSubscriber(key: string, connectionId: string): Promise<void> {
+        let subscribers = this.topicSubscribers.get(key);
+        if (!subscribers) {
+            subscribers = new Set();
+            this.topicSubscribers.set(key, subscribers);
+        }
+        subscribers.add(connectionId);
+
+        if (!this.pubsub.enabled) return Promise.resolve();
+        if (this.redisHandlers.has(key)) return this.pubsub.whenSubscribed(key);
+
+        const handler = (raw: string) => this.handleRedisMessage(key, raw);
+        this.redisHandlers.set(key, handler);
+        return this.pubsub.subscribe(key, handler);
+    }
+
+    /** Returns whether the connection was subscribed. */
+    private removeSubscriber(key: string, connectionId: string): boolean {
+        const subscribers = this.topicSubscribers.get(key);
+        if (!subscribers?.delete(connectionId)) return false;
+
+        if (subscribers.size === 0) {
+            this.topicSubscribers.delete(key);
+            const handler = this.redisHandlers.get(key);
+            if (handler) {
+                this.redisHandlers.delete(key);
+                void this.pubsub.unsubscribe(key, handler);
+            }
+        }
+        return true;
     }
 
     private handleRedisMessage(key: string, raw: string): void {
@@ -263,6 +331,36 @@ export class ChannelRegistry {
             this.deliverToLocalSubscribers(key, message);
         } catch {
             this.deliverToLocalSubscribers(key, raw);
+        }
+    }
+
+    private handleUserMessage(raw: string): void {
+        let envelope: RedisEnvelope | null;
+        try {
+            envelope = JSON.parse(raw) as RedisEnvelope | null;
+        } catch {
+            this.logger.warn("Dropped malformed user message from Redis.");
+            return;
+        }
+        if (
+            !envelope ||
+            envelope._instanceId === this.instanceId ||
+            typeof envelope.userId !== "string" ||
+            typeof envelope.message !== "string"
+        ) {
+            return;
+        }
+        this.deliverToUser(envelope.userId, envelope.message);
+    }
+
+    private deliverToUser(userId: string, message: string): void {
+        if (!this.deliverFn || !this.getUserConnsFn) return;
+        for (const id of this.getUserConnsFn(userId)) {
+            try {
+                this.deliverFn(id, message);
+            } catch (err) {
+                this.logger.error(`Delivery to ${id} failed:`, err);
+            }
         }
     }
 
