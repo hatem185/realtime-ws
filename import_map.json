@@ -1,0 +1,6 @@
+{
+    "imports": {
+        "ws": "npm:ws@8.20.0",
+        "@types/ws": "npm:@types/ws@8.18.1"
+    }
+}

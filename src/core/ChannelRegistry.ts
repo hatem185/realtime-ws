@@ -1,7 +1,7 @@
-import { randomUUID } from "crypto";
-import type { AuthIdentity, IChannel, Logger } from "../types";
-import { settleWithin } from "../utils/async";
-import type { RedisPubSub } from "./RedisPubSub";
+import { randomUUID } from "node:crypto";
+import type { AuthIdentity, IChannel, Logger } from "../types.ts";
+import { settleWithin } from "../utils/async.ts";
+import type { RedisPubSub } from "./RedisPubSub.ts";
 
 type DeliveryFn = (connectionId: string, message: string) => void;
 type GetUserConnsFn = (userId: string) => Set<string>;

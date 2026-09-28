@@ -1,4 +1,4 @@
-import type { AuthIdentity, TokenAuthenticator } from "../types";
+import type { AuthIdentity, TokenAuthenticator } from "../types.ts";
 
 /**
  * Tiny adapter that wraps a plain `verify(token)` function as a

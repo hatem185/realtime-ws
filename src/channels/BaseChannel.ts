@@ -1,4 +1,4 @@
-import type { AuthIdentity, IChannel } from "../types";
+import type { AuthIdentity, IChannel } from "../types.ts";
 
 /**
  * Convenience base for channels — provides no-op defaults for every

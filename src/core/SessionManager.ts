@@ -1,6 +1,6 @@
-import { randomUUID } from "crypto";
-import type { Logger, RedisLike } from "../types";
-import { redisUsable } from "../utils/async";
+import { randomUUID } from "node:crypto";
+import type { Logger, RedisLike } from "../types.ts";
+import { redisUsable } from "../utils/async.ts";
 
 const LAST_ACTIVE_TTL_SECONDS = 90 * 24 * 60 * 60;
 

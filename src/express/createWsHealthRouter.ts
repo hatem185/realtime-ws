@@ -1,5 +1,5 @@
 import type { Request, Response, Router } from "express";
-import type { RealtimeHub } from "../core/RealtimeHub";
+import type { RealtimeHub } from "../core/RealtimeHub.ts";
 
 /** Most ids accepted by `POST /online/bulk` in one request. */
 const MAX_BULK_IDS = 1000;

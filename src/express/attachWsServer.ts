@@ -1,10 +1,13 @@
-import type { IncomingMessage, Server as HttpServer } from "http";
-import type { Socket } from "net";
+import type { Buffer } from "node:buffer";
+import type { IncomingMessage, Server as HttpServer } from "node:http";
+import type { Socket } from "node:net";
+import { clearTimeout } from "node:timers";
+// @ts-types="@types/ws"
 import { WebSocketServer } from "ws";
-import type { RealtimeHub } from "../core/RealtimeHub";
-import type { AuthIdentity } from "../types";
-import { LIMIT_DEFAULTS } from "../core/ConnectionManager";
-import { errorMessage, settleWithin, startTimer } from "../utils/async";
+import type { RealtimeHub } from "../core/RealtimeHub.ts";
+import type { AuthIdentity } from "../types.ts";
+import { LIMIT_DEFAULTS } from "../core/ConnectionManager.ts";
+import { errorMessage, settleWithin, startTimer } from "../utils/async.ts";
 
 export interface AttachOptions {
     /**

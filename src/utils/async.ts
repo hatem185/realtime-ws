@@ -1,4 +1,5 @@
-import type { RedisLike } from "../types";
+import { clearTimeout, setTimeout } from "node:timers";
+import type { RedisLike } from "../types.ts";
 
 /** Longest delay setTimeout supports; larger values would fire after 1 ms. */
 const MAX_TIMER_MS = 2 ** 31 - 1;

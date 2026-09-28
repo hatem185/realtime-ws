@@ -1,3 +1,4 @@
+// @ts-types="@types/ws"
 import type { WebSocket } from "ws";
 
 /**

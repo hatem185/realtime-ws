@@ -1,3 +1,4 @@
+// @ts-types="@types/ws"
 import type { WebSocket } from "ws";
 import type {
     AuthIdentity,
@@ -5,12 +6,12 @@ import type {
     Logger,
     RealtimeHubOptions,
     ResolvedHubOptions,
-} from "../types";
-import { defaultLogger } from "../utils/logger";
-import { ChannelRegistry } from "./ChannelRegistry";
-import { ConnectionManager, LIMIT_DEFAULTS } from "./ConnectionManager";
-import { RedisPubSub } from "./RedisPubSub";
-import { SessionManager } from "./SessionManager";
+} from "../types.ts";
+import { defaultLogger } from "../utils/logger.ts";
+import { ChannelRegistry } from "./ChannelRegistry.ts";
+import { ConnectionManager, LIMIT_DEFAULTS } from "./ConnectionManager.ts";
+import { RedisPubSub } from "./RedisPubSub.ts";
+import { SessionManager } from "./SessionManager.ts";
 
 /**
  * The single object the host application interacts with.

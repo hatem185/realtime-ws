@@ -1,4 +1,7 @@
-import { randomUUID } from "crypto";
+import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
+import { clearInterval, setImmediate, setInterval } from "node:timers";
+// @ts-types="@types/ws"
 import type { RawData, WebSocket } from "ws";
 import type {
     AuthIdentity,
@@ -6,10 +9,10 @@ import type {
     ConnectionInfo,
     Logger,
     ResolvedHubOptions,
-} from "../types";
-import { settleWithin } from "../utils/async";
-import { type ChannelRegistry, topicKey } from "./ChannelRegistry";
-import type { SessionManager } from "./SessionManager";
+} from "../types.ts";
+import { settleWithin } from "../utils/async.ts";
+import { type ChannelRegistry, topicKey } from "./ChannelRegistry.ts";
+import type { SessionManager } from "./SessionManager.ts";
 
 const MISSED_PONG_LIMIT = 2;
 /** Longest `connected` waits for the user's presence to reach Redis. */

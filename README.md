@@ -145,7 +145,23 @@ Then `npm install` and you can `import { ... } from "realtime-ws"` (CommonJS or 
 >
 > `express` is optional: the package loads without it; only `createWsHealthRouter()` needs it. TypeScript hosts without Express need `skipLibCheck: true` (the default in most setups) or `@types/express`, because the router's declaration file refers to Express types.
 >
-> **Deno 2** works through its Node compatibility layer: use `node:http` with `ws` (and `ioredis`) from npm, exactly as above. Sockets from `Deno.serve()` + `Deno.upgradeWebSocket()` aren't supported, because the hub needs the `ws` socket API. For `deno check`, add `@types/node` to the host project.
+> **Deno 2** works through its Node compatibility layer: use `node:http` with `ws` (and `ioredis`) from npm, exactly as above. Sockets from `Deno.serve()` + `Deno.upgradeWebSocket()` aren't supported, because the hub needs the `ws` socket API. For `deno check`, add `@types/node` to the host project. Deno can also run the TypeScript source directly — see 3.1.
+
+### 3.1 Deno / epic-api plugin
+
+The source runs in Deno as is: relative imports carry their `.ts` extension, Node built-ins use `node:` specifiers, and timers and `Buffer` are imported from `node:timers` / `node:buffer`. The Node build is unaffected (`rewriteRelativeImportExtensions` turns `.ts` imports into `.js` requires). Deno imports `src/mod.ts` — everything except the Express health router — with `ws` mapped by `import_map.json`.
+
+The repository is also an epic-api plugin: `import_map.json` and one empty `.sequence.json` per module folder (`controllers/`, `models/`, `jobs/`, …), so the host's loader finds nothing to register and logs nothing. In an epic-api host:
+
+```sh
+deno task add:plugin --name hatem185/realtime-ws      # branch: hatem185/realtime-ws:<branch>
+```
+
+```ts
+import { attachWsServer, createRealtimeHub } from "@Plugins/hatem185/realtime-ws/src/mod.ts";
+```
+
+Update it later with `deno task update:plugin`.
 
 ---
 

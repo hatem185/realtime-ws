@@ -1,5 +1,5 @@
-import type { AuthIdentity } from "../types";
-import { BaseChannel } from "./BaseChannel";
+import type { AuthIdentity } from "../types.ts";
+import { BaseChannel } from "./BaseChannel.ts";
 
 /**
  * Server-push-only channel. Authorizes everyone for every topic and

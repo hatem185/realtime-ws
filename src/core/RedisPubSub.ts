@@ -1,5 +1,5 @@
-import type { Logger, RedisLike } from "../types";
-import { errorMessage, redisUsable, settleWithin } from "../utils/async";
+import type { Logger, RedisLike } from "../types.ts";
+import { errorMessage, redisUsable, settleWithin } from "../utils/async.ts";
 
 type Handler = (message: string) => void;
 
