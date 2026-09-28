@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Framework-agnostic, multi-instance WebSocket real-time plugin with channel-based pub/sub. Designed to plug into the custom-api architecture (Express + TypeScript + Redis).",
   "private": true,
+  "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

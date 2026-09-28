@@ -144,6 +144,8 @@ Then `npm install` and you can `import { ... } from "realtime-ws"` (CommonJS or 
 > The package is consumed from its compiled `dist/` (`main`/`types`/`exports` point there). `npm install` inside the package builds it (the `prepare` script), and so does `npm pack`, whose tarball you can install instead of a `file:` path. Only the package root (and `realtime-ws/package.json`) is exported: import everything from `"realtime-ws"`.
 >
 > `express` is optional: the package loads without it; only `createWsHealthRouter()` needs it. TypeScript hosts without Express need `skipLibCheck: true` (the default in most setups) or `@types/express`, because the router's declaration file refers to Express types.
+>
+> **Deno 2** works through its Node compatibility layer: use `node:http` with `ws` (and `ioredis`) from npm, exactly as above. Sockets from `Deno.serve()` + `Deno.upgradeWebSocket()` aren't supported, because the hub needs the `ws` socket API. For `deno check`, add `@types/node` to the host project.
 
 ---
 
