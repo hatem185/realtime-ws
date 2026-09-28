@@ -167,7 +167,8 @@ export class RealtimeHub {
     /**
      * Graceful shutdown — call from your SIGTERM handler. Stops accepting connections, closes
      * every connection with 1001 (going away), removes presence from Redis and quits the
-     * subscriber connection. Bounded by `shutdownTimeoutMs`; repeated calls share one run.
+     * subscriber connection. Bounded by `shutdownTimeoutMs`, plus at most 1 s to quit the
+     * subscriber; repeated calls share one run.
      */
     shutdown(): Promise<void> {
         if (!this.shutdownPromise) {

@@ -74,6 +74,8 @@ export class ConnectionManager {
     private readonly userConnections = new Map<string, Set<string>>();
     private heartbeatTimer: NodeJS.Timeout | null = null;
     private heartbeatRunning = false;
+    /** Heartbeat presence refreshes that Redis hasn't answered yet. */
+    private refreshesInFlight = 0;
     private readonly logger: Logger;
     private shuttingDown = false;
     private dropped = 0;
@@ -117,6 +119,9 @@ export class ConnectionManager {
             return randomUUID();
         }
 
+        // Numeric ids (e.g. from an untyped JWT payload) are used as strings, like everywhere else.
+        const rawUserId: unknown = identity.userId;
+        if (typeof rawUserId === "number") identity = { ...identity, userId: String(rawUserId) };
         const userId = identity.userId;
 
         // Free a slot before taking one, in the same tick, so concurrent registrations can't
@@ -158,6 +163,13 @@ export class ConnectionManager {
         socket.on("pong", () => {
             info.missedPongs = 0;
             info.lastPongAt = Date.now();
+        });
+        socket.on("ping", () => {
+            // ws has already queued its automatic pong, without looking at the send buffer: a
+            // client that stops reading and keeps pinging would make us buffer pongs without bound.
+            if (socket.bufferedAmount > this.opts.backpressureThresholdBytes) {
+                this.terminate(connectionId);
+            }
         });
         socket.on("close", () => {
             this.unregister(connectionId).catch((err) =>
@@ -242,9 +254,15 @@ export class ConnectionManager {
             infos.push(info);
         }
 
+        // Everyone's presence goes at once, so users who don't reconnect elsewhere go offline even
+        // when slow onDisconnect hooks keep the cleanup below from reaching them in time.
+        const presence = infos.map((info) => this.removePresence(info));
         let next = 0;
         const worker = async () => {
-            while (next < infos.length) await this.cleanup(infos[next++]);
+            while (next < infos.length) {
+                const i = next++;
+                await this.cleanup(infos[i], presence[i]);
+            }
         };
         const cleanups = Array.from(
             { length: Math.min(SHUTDOWN_CONCURRENCY, infos.length) },
@@ -279,18 +297,21 @@ export class ConnectionManager {
         return info;
     }
 
-    private async cleanup(info: Connection): Promise<void> {
+    private async cleanup(info: Connection, presence = this.removePresence(info)): Promise<void> {
         // Bounded: local presence is already gone, and anything a hook then sends on the same
         // Redis client queues behind these commands anyway.
-        const presence = this.sessions
-            .unregister(info.connectionId)
-            .catch((err) => this.logger.error("Session unregister error:", err));
         await settleWithin(presence, PRESENCE_WAIT_MS);
         await this.registry.notifyDisconnect(info.connectionId, info.identity, info.channels);
 
         this.logger.info(
             `Connection ${info.connectionId} unregistered. Total: ${this.connections.size}`,
         );
+    }
+
+    private removePresence(info: Connection): Promise<void> {
+        return this.sessions
+            .unregister(info.connectionId)
+            .catch((err) => this.logger.error("Session unregister error:", err));
     }
 
     /** Every outbound write goes through here. */
@@ -346,16 +367,18 @@ export class ConnectionManager {
         }
         info.messageCount++;
         if (info.messageCount > this.opts.rateLimitMaxMessages) {
-            this.sendError(info, "RATE_LIMITED", "Too many messages, slow down");
+            // A pong still counts: a busy client mustn't be dropped as dead because of its own
+            // traffic. Only tiny object frames are parsed here, so a flood stays cheap to refuse.
+            if (data.length <= 64 && data[0] === 0x7b && isAction(parseJson(data), "pong")) {
+                info.missedPongs = 0;
+                info.lastPongAt = now;
+            } else {
+                this.sendError(info, "RATE_LIMITED", "Too many messages, slow down");
+            }
             return;
         }
 
-        let parsed: unknown;
-        try {
-            parsed = JSON.parse(data.toString("utf8"));
-        } catch {
-            parsed = INVALID_JSON;
-        }
+        const parsed = parseJson(data);
         if (isAction(parsed, "ping")) {
             this.sendRaw(info, PONG_EVENT);
             return;
@@ -550,6 +573,9 @@ export class ConnectionManager {
      */
     private async heartbeat(): Promise<void> {
         const now = Date.now();
+        // Redis hasn't answered the previous pass's refreshes (e.g. a stalled connection that
+        // hasn't errored yet): don't queue another round of commands behind them.
+        const refresh = this.refreshesInFlight === 0;
         const ids = [...this.connections.keys()];
         for (let i = 0; i < ids.length; i += HEARTBEAT_SLICE) {
             if (i > 0) await new Promise((resolve) => setImmediate(resolve));
@@ -595,10 +621,12 @@ export class ConnectionManager {
                 // Also send an app-level ping for clients that don't speak ws ping frames
                 this.sendRaw(info, PING_EVENT);
             }
-            if (alive.length > 0) {
+            if (refresh && alive.length > 0) {
+                this.refreshesInFlight++;
                 this.sessions
                     .refresh(alive, activeUsers)
-                    .catch((err) => this.logger.error("Presence refresh error:", err));
+                    .catch((err) => this.logger.error("Presence refresh error:", err))
+                    .finally(() => this.refreshesInFlight--);
             }
         }
     }
@@ -622,6 +650,14 @@ export class ConnectionManager {
             }
         }
         return oldestId;
+    }
+}
+
+function parseJson(data: Buffer): unknown {
+    try {
+        return JSON.parse(data.toString("utf8"));
+    } catch {
+        return INVALID_JSON;
     }
 }
 

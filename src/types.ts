@@ -192,9 +192,9 @@ export interface RealtimeHubOptions {
     sessionTtlSeconds?: number;
 
     /**
-     * Upper bound for {@link RealtimeHub.shutdown}: how long to wait for close handshakes
-     * and cleanup before terminating what's left. Keep it below your orchestrator's
-     * termination grace period. Default: 10000.
+     * How long {@link RealtimeHub.shutdown} waits for close handshakes and cleanup before
+     * terminating what's left; quitting the Redis subscriber afterwards adds at most 1 s.
+     * Keep the total below your orchestrator's termination grace period. Default: 10000.
      */
     shutdownTimeoutMs?: number;
 
