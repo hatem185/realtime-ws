@@ -1,0 +1,33 @@
+{
+  "name": "realtime-ws",
+  "version": "1.0.0",
+  "description": "Framework-agnostic, multi-instance WebSocket real-time plugin with channel-based pub/sub. Designed to plug into the custom-api architecture (Express + TypeScript + Redis).",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "ws": "^8.0.0",
+    "ioredis": "^5.0.0",
+    "express": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true },
+    "express": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.4.0"
+  }
+}
