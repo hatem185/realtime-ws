@@ -1,11 +1,11 @@
 import type { Logger } from "../types.ts";
 
-const PREFIX = "[realtime-ws]";
+const noop = (..._args: unknown[]): void => {};
 
-/** Default logger — prefixes every line so it is easy to grep in production. */
+/** Default logger — intentionally silent to avoid console calls inside the package. */
 export const defaultLogger: Logger = {
-    debug: (msg, ...meta) => console.debug(`${PREFIX} ${msg}`, ...meta),
-    info: (msg, ...meta) => console.log(`${PREFIX} ${msg}`, ...meta),
-    warn: (msg, ...meta) => console.warn(`${PREFIX} ${msg}`, ...meta),
-    error: (msg, ...meta) => console.error(`${PREFIX} ${msg}`, ...meta),
+    debug: noop,
+    info: noop,
+    warn: noop,
+    error: noop,
 };
